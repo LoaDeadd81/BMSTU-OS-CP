@@ -1,0 +1,513 @@
+\chapter{Аналитический раздел}
+
+\section{Постановка задачи}
+
+В соответствии с техническим заданием на курсовую работу необходимо разработать загружаемый модуль, предоставляющий пользователю информацию о работе сетевой подсистемы Linux. Для решения поставленной задачи необходимо:
+\begin{itemize}[label=---]
+	\item провести анализ функций и структур, используемых для обработки сетевых кадров;
+	\item провести анализ функций и структур, позволяющие получить и вывести информацию о сетевой подсистеме;
+	\item разработать загружаемый модуль ядра, предоставляющий информацию о работе сетевой подсистемы;
+	\item реализовать модуль ядра;
+	\item протестировать работу реализованного загружаемого модуля;
+\end{itemize}
+
+\section{Взаимодействие сетевой карты и сетевой подсистемы}
+
+Почти все устройства (включая сетевые адаптеры) взаимодействуют с ядром одним из двух способов: опрос и прерывания. Также на практике может применяться комбинация этих методов.
+
+При \textbf{опросе} ядро постоянно проверяет, есть ли у устройства какие--то данные для передачи. Оно может делать это, например, постоянно считывая регистр памяти на устройстве или переодически, по истечению таймера, проводить проверку. Такой подход приводит к растрате большого количества системных ресурсов и редко применяется.
+
+При использовании \textbf{прерываний} устройство генерирует аппаратный сигнал при возникновении определённых событий. Каждое прерывание запускает функцию, называемую обработчиком прерываний, которая должна быть совместима с
+устройством, следовательно, она регистрируется драйвером устройства при его загрузке. Для идентификации обработчика ядру нужны как номер IRQ, так и идентификатор устройства. Это нужно, так как IRQ может совместно использоваться несколькими устройствами при определённых условиях.
+
+При прерывании сетевая карта может сообщить своему драйверу несколько разных вещей. Среди них:
+\begin{itemize}[label=---]
+	\item получение кадра --- наиболее распространённая и стандартная ситуация;
+	\item сбой передачи --  драйвер не передаёт это уведомление на более высокие сетевые уровни, так как они узнают о сбое другими способами (тайм-ауты таймера, отрицательные подтверждения и т.д.);
+	\item передача DMA успешно завершена --- получив кадр для отправки, буфер, в котором он хранится, освобождается драйвером, как только кадр загружается в память сетевой карты для передачи. При синхронных передачах (без DMA) драйвер сразу узнает, когда кадр был загружен на сетевую карту. Но при использовании DMA, который использует асинхронные передачи, драйверу устройства необходимо дождаться явного прерывания от сетевой карты;
+	\item устройство имеет достаточно памяти для обработки новой передачи --- драйвер сетевого устройства обычно отключает передачу, останавливая очередь на выход, когда в этой очереди недостаточно свободного места для хранения кадра максимального размера.
+\end{itemize}
+
+Этот метод представляет собой наилучший вариант при низких нагрузках на трафик. Но он плохо работает при высокой нагрузке: обработка прерываний для обслуживания каждого кадра может занять большую часть ресурсов процессора.
+
+Большое количество драйверов обрабатывают сразу несколько кадров при прерывании. Обработчик, зарегистрированный драйвером, загружает кадры и помещает их в очередь ввода ядра, вплоть до максимального количества кадров или конца временного интервала. Ограничение нужно поскольку прерывания отключены, пока
+запущен обработчик драйвера. Иначе всё процессорное время будет занято лишь обработкой сетевого трафика.  Из--за этого у других устройств могут начать переполнится буферы, так как их обработчик не будет своевременно забирать оттуда данные, что приведёт к потерям. Подобным образом функционирует NAPI.
+
+Прерывания, управляемые таймером это метод, который является усовершенствованием предыдущих. Вместо того, чтобы устройство асинхронно уведомляло драйвер о приёме кадра, прерывания генерируются с определённым интервалом. Затем обработчик проверит, поступили ли какие-либо кадры после предыдущего прерывания, и обработает их все за один раз.
+
+\section{Обработка прерываний}
+
+Всякий раз, когда процессор получает прерывании, он вызывает обработчик, связанный с этим прерыванием. Во время выполнения обработчика, в котором код ядра находится в контексте прерывания, другие прерывания отключаются для этого процессора. Это означает, что если процессор занят обслуживанием одного прерывания, он не может обслуживать другие. Он также не может выполнять какой-либо другой процесс. Такой выбор дизайна помогает снизить вероятность возникновения условий гонки. Однако такие жёсткие ограничения на работу процессора серьёзно влияют на производительность системы. Следовательно, работа, выполняемая обработчиками прерываний, должна быть как можно более быстрой. Объем работы обработчика  зависит от типа события, иногда нужно просто сохранить код нажатой клавиши, а в другом случае действия не являются тривиальными, и их выполнение может потребовать много процессорного времени. У драйверов сетевых устройств относительно сложная работа: им нужно выделить буфер (sk\_buff), скопировать в него полученные данные, инициализировать несколько параметров в структуре буфера для обработчиков протокола более высокого уровня и передать дальше по цепочке обслуживания. 
+
+По этой причине современные обработчики прерываний делятся на верхнюю и нижнюю половины. Верхняя половина состоит из всего, что должно быть выполнено перед освобождением процессора, как правило это загрузки данных, необходимых для дальнейшей обработки. Нижняя половина содержит все остальное, то есть выполняет основную часть работы по обработке прерывания. Нижнюю половину можно определить как асинхронный запрос на выполнение определённой
+функции. Следующая модель позволяет ядру отключать прерывания на гораздо меньшее время:
+\begin{itemize}[label=---]
+	\item устройство генерирует сигнал прерывания;
+	\item процессор выполняет верхнюю половину и блокирует прерывания, как правило она делает следующее: сохраняет в оперативной памяти всю информацию, которая позже понадобится нижней половине, планирует на выполнение нижнюю половину и разрешает прерывания;
+	\item позднее выполняется нижняя половина прерывания, содержащая основной объём работы, но уже не в контексте прерывания.
+\end{itemize}
+
+Самым большим улучшением между ядрами 2.2 и 2.4, стало внедрение программных прерываний (softirqs), которые можно рассматривать как многопоточную версию обработчиков нижней половины. Многие softirq могут выполняться конкурентно, но также один и тот же softirq может выполняться конкурентно на разных процессорах. Единственное ограничение на параллелизм заключается в том, что только один экземпляр каждого softirq может выполняться одновременно на процессоре. Есть всего 6 типов softirq:
+\begin{itemize}[label=---]
+	\item HI\_SOFTIRQ;
+	\item TIMER\_SOFTIRQ;
+	\item NET\_TX\_SOFTIRQ;
+	\item NET\_RX\_SOFTIRQ;
+	\item SCSI\_SOFTIRQ;
+	\item TASKLET\_SOFTIRQ.
+\end{itemize}
+
+В сетевом коде используются два типа прерываний NET\_TX\_SOFTIRQ и NET\_RX\_SOFTIRQ. Каждый тип softirq может поддерживать массив структур данных типа softnet\_data, по одной на процессор, для хранения информации о состоянии текущего softirq и управления их выполнением. Для их выполнения в системе запускаются потоки ksoftirqd, по одному на процессор, которые крутятся в цикле в ожидание поступления работы. При наличии запланированных на выполнение нижних половин прерываний вызывается функция do\_softirq, которая и выполняет зарегистрированный обработчик. Сама функция do\_softirq, проверив, что сейчас не обрабатываются прерывания, сохраняет битовую маску softirq ожидающих для обработки и переходит выполнению обработчика (функция \_\_do\_softirq). В моменты обращения к битовой маске (структуре softnet\_data), блокируются прерывания. Проходятся по битовой маске в цикле, определяются softirq требующие выполнения и запускаются зарегистрированные обработчики хранящиеся в массиве softirq\_vec (для NET\_RX\_SOFTIRQ это net\_rx\_action). Их код представлен в листинге \ref{lst:do_softirq}
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:do_softirq,caption=Код функций do\_softirq и \_\_do\_softirq]
+asmlinkage __visible void do_softirq(void)
+{
+	__u32 pending;
+	unsigned long flags;
+	
+	if (in_interrupt())
+	return;
+	
+	local_irq_save(flags);
+	
+	pending = local_softirq_pending();
+	
+	if (pending)
+	do_softirq_own_stack();
+	
+	local_irq_restore(flags);
+}
+
+asmlinkage __visible void __softirq_entry __do_softirq(void)
+{
+	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
+	unsigned long old_flags = current->flags;
+	int max_restart = MAX_SOFTIRQ_RESTART;
+	struct softirq_action *h;
+	bool in_hardirq;
+	__u32 pending;
+	int softirq_bit;
+	
+	/*
+	* Mask out PF_MEMALLOC as the current task context is borrowed for the
+	* softirq. A softirq handled, such as network RX, might set PF_MEMALLOC
+	* again if the socket is related to swapping.
+	*/
+	current->flags &= ~PF_MEMALLOC;
+	
+	pending = local_softirq_pending();
+	
+	softirq_handle_begin();
+	in_hardirq = lockdep_softirq_start();
+	account_softirq_enter(current);
+	
+	restart:
+	/* Reset the pending bitmask before enabling irqs */
+	set_softirq_pending(0);
+	
+	local_irq_enable();
+	
+	h = softirq_vec;
+	
+	while ((softirq_bit = ffs(pending))) {
+		unsigned int vec_nr;
+		int prev_count;
+		
+		h += softirq_bit - 1;
+		
+		vec_nr = h - softirq_vec;
+		prev_count = preempt_count();
+		
+		kstat_incr_softirqs_this_cpu(vec_nr);
+		
+		trace_softirq_entry(vec_nr);
+		h->action(h);
+		trace_softirq_exit(vec_nr);
+		if (unlikely(prev_count != preempt_count())) {
+			pr_err("huh, entered softirq %u %s %p with preempt_count %08x, exited with %08x?\n",
+			vec_nr, softirq_to_name[vec_nr], h->action,
+			prev_count, preempt_count());
+			preempt_count_set(prev_count);
+		}
+		h++;
+		pending >>= softirq_bit;
+	}
+	
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT) &&
+	__this_cpu_read(ksoftirqd) == current)
+	rcu_softirq_qs();
+	
+	local_irq_disable();
+	
+	pending = local_softirq_pending();
+	if (pending) {
+		if (time_before(jiffies, end) && !need_resched() &&
+		--max_restart)
+		goto restart;
+		
+		wakeup_softirqd();
+	}
+	
+	account_softirq_exit(current);
+	lockdep_softirq_end(in_hardirq);
+	softirq_handle_end();
+	current_restore_flags(old_flags, PF_MEMALLOC);
+}
+
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+В сетевой подсистеме NET\_RX\_SOFTIRQ используется для обработки входящего трафика, а NET\_TX\_SOFTIRQ исходящего. Их обработчики регистрируются при инициализации устройства. Они имеют приоритет ниже чем HI\_SOFTIRQ, но выше чем у TASKLET\_SOFTIRQ. Такая расстановка приоритетов гарантирует, что другие высокоприоритетные задачи могут выполняться оперативно и своевременно, даже когда система находится под высокой сетевой нагрузкой. 
+
+Каждый процессор имеет свою собственную структуру данных для управления входящим и исходящим трафиком. Это структура  softnet\_data, которая представлена в листинге \ref{lst:softnet_data}.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:softnet_data,caption=Код структуры softnet\_data]
+struct softnet_data {
+	struct list_head	poll_list;
+	struct sk_buff_head	process_queue;
+	
+	/* stats */
+	unsigned int		processed;
+	unsigned int		time_squeeze;
+	#ifdef CONFIG_RPS
+	struct softnet_data	*rps_ipi_list;
+	#endif
+	
+	bool			in_net_rx_action;
+	bool			in_napi_threaded_poll;
+	
+	#ifdef CONFIG_NET_FLOW_LIMIT
+	struct sd_flow_limit __rcu *flow_limit;
+	#endif
+	struct Qdisc		*output_queue;
+	struct Qdisc		**output_queue_tailp;
+	struct sk_buff		*completion_queue;
+	#ifdef CONFIG_XFRM_OFFLOAD
+	struct sk_buff_head	xfrm_backlog;
+	#endif
+	/* written and read only by owning cpu: */
+	struct {
+		u16 recursion;
+		u8  more;
+		#ifdef CONFIG_NET_EGRESS
+		u8  skip_txqueue;
+		#endif
+	} xmit;
+	#ifdef CONFIG_RPS
+	/* input_queue_head should be written by cpu owning this struct,
+	* and only read by other cpus. Worth using a cache line.
+	*/
+	unsigned int		input_queue_head ____cacheline_aligned_in_smp;
+	
+	/* Elements below can be accessed between CPUs for RPS/RFS */
+	call_single_data_t	csd ____cacheline_aligned_in_smp;
+	struct softnet_data	*rps_ipi_next;
+	unsigned int		cpu;
+	unsigned int		input_queue_tail;
+	#endif
+	unsigned int		received_rps;
+	unsigned int		dropped;
+	struct sk_buff_head	input_pkt_queue;
+	struct napi_struct	backlog;
+	
+	/* Another possibly contended cache line */
+	spinlock_t		defer_lock ____cacheline_aligned_in_smp;
+	int			defer_count;
+	int			defer_ipi_scheduled;
+	struct sk_buff		*defer_list;
+	call_single_data_t	defer_csd;
+};		
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+Структура включает в себя как поля, используемые для приёма, так и поля, используемые для передачи. Не все драйвера используют NAPI, но всем они используют эту структуру. Рассмотрим некоторые поля подробнее:
+\begin{itemize}[label=---]
+	\item poll\_list --- двунаправленный список NAPI--структур с входными кадрами, ожидающими обработки;
+	\item process\_queue --- очередь кадров обрабатываемая в process\_backlog;
+	\item processed --- количество обработанных кадров;
+	\item time\_squeeze --- оличество раз, когда у net\_rx\_action была работа, но бюджета не хватало либо было достигнуто ограничение по времени, прежде чем работа была завершена;
+	\item in\_net\_rx\_action --- флаг о том, что данный экземпляр структуры в текущей момент обрабатывается функцией  net\_rx\_action;
+	\item flow\_limit --- поле, хранящее данные о ограничении потоков RPS;
+	\item output\_queue --- список устройств, которым есть что передать;
+	\item completion\_queue --- список буферов данных, которые были успешно переданы и, следовательно, могут быть освобождены;
+	\item received\_rps --- количество раз, когда посредством межпроцессорного прерывания будили CPU для обработки пакетов;
+	\item dropped --- количество отброшенных кадров по причине нехватки места в очереди обработки;
+	\item input\_pkt\_queue --- очередь, где сохраняются входящие кадры перед обработкой драйвером. Она используется драйверами, не использующими NAPI, или как backlog--очередь. Драйвера с NAPI используют свои собственные частные очереди;
+	\item backlog --- NAPI--структура для обработки backlog--очереди.
+\end{itemize}
+
+\section{Механизм NAPI}
+
+New Api (NAPI) был создан в качестве механизма снижения количества прерываний, генерируемых сетевыми устройствами по мере прибытия пакетов. Но всё же NAPI не может совсем избавить нас от прерываний. Он позволяет драйверу устройства регистрировать функцию poll, вызываемую подсистемой NAPI для сбора фрейма данных.
+
+Основная идея реализованная в NAPI заключается в комбинации методов прерывания и опроса. Если новые кадры получены, когда ядро ещё не завершило обработку предыдущих, нет необходимости в генерации новых прерывание, можно просто продолжать обрабатывать все, что находится в очереди ввода устройства (с отключёнными прерываниями для устройства), и повторно включать прерывания, как только очередь опустеет. Таким образом,  используются преимущества как прерываний, так и опроса:
+\begin{itemize}[label=---]
+	\item асинхронные события, такие как приём одного или нескольких кадров, обозначаются прерываниями, так что ядру не нужно постоянно проверять, пуста ли очередь входа устройства;
+	\item если в очереди входа устройства что--то осталось, не нужно заново генерировать прерывания и тратить время на их обработку.
+\end{itemize}
+
+Алгоритм использования NAPI драйверами сетевых устройств выглядит так:
+\begin{itemize}[label=---]
+	\item драйвер включает NAPI, но изначально тот находится в неактивном состоянии;
+	\item прибывает пакет, и сетевая карта напрямую отправляет его в память;
+	\item сетевая карта генерирует IRQ посредством запуска обработчика прерываний в драйвере
+	\item драйвер будит подсистему NAPI с помощью SoftIRQ, которая начинает собирать пакеты вызывая зарегистрированную драйвером функцию poll;
+	\item драйвер отключает последующие генерирования прерываний сетевой картой, чтобы позволить подсистеме NAPI обрабатывать пакеты без помех со стороны устройства;
+	\item когда вся работа выполнена, подсистема NAPI отключается, а генерирование прерываний устройством включается снова.
+\end{itemize}
+
+Этот метод сбора фреймов данных позволил уменьшить нагрузку по сравнению со старым методом, поскольку многие фреймы могут одновременно приниматься без необходимости одновременного генерирования IRQ для каждого из них. Драйвер устройства реализует функцию poll и регистрирует её с помощью NAPI.
+
+\section{Получение данных}
+
+Высокоуровневый путь, по которому проходит пакет от прибытия до приёмного буфера сокета выглядит так:
+\begin{itemize}[label=---]
+	\item драйвер загружается и инициализируется;
+	\item пакет прибывает из сети в сетевую карту;
+	\item пакет копируется (посредством DMA) в кольцевой буфер памяти ядра;
+	\item генерируется аппаратное прерывание, чтобы система узнала о появлении пакета в памяти;
+	\item драйвер вызывает NAPI, чтобы начать цикл опроса (poll loop), если он ещё не начат;
+	\item на каждом CPU системы работают процессы ksoftirqd. Они регистрируются во время загрузки. Эти процессы вытаскивают пакеты из кольцевого буфера с помощью вызова NAPI-функции poll, зарегистрированной драйвером устройства во время инициализации;
+	\item очищаются (unmapped) те области памяти в кольцевом буфере, в которые были записаны сетевые данные;
+	\item данные, отправленные напрямую в память (DMA), передаются для дальнейшей обработки на сетевой уровень в виде ‘skb’;
+	\item если включено управление пакетами, или если в сетевой карте есть несколько очередей приёма, то фреймы входящих сетевых данных распределяются по нескольким CPU системы;
+	\item фреймы сетевых данных передаются из очереди на уровни протоколов;
+	\item уровни протоколов обрабатывают данные;
+	\item данные добавляются в буферы приёма, прикреплённые к сокетам уровнями протоколов.
+\end{itemize}
+
+При получении кадра на сетевой карте генерируется прерывание, обработчик которого был зарегистрирован при инициализации драйвера. В самом обработчике выполняется выполняется какой--то код драйвера и вызывается функция napi\_schedule (обёртка для \_\_\_\_napi\_schedule), в которую как параметр предаётся napi\_struct драйвера. Её код представлен в листинге \ref{lst:napi_schedule}.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:napi_schedule,caption=Код функции \_\_\_\_napi\_schedule,showstringspaces=false]
+static inline void ____napi_schedule(struct softnet_data *sd,
+struct napi_struct *napi)
+{
+	struct task_struct *thread;
+	
+	lockdep_assert_irqs_disabled();
+	
+	if (test_bit(NAPI_STATE_THREADED, &napi->state)) {
+		/* Paired with smp_mb__before_atomic() in
+		* napi_enable()/dev_set_threaded().
+		* Use READ_ONCE() to guarantee a complete
+		* read on napi->thread. Only call
+		* wake_up_process() when it's not NULL.
+		*/
+		thread = READ_ONCE(napi->thread);
+		if (thread) {
+			/* Avoid doing set_bit() if the thread is in
+			* INTERRUPTIBLE state, cause napi_thread_wait()
+			* makes sure to proceed with napi polling
+			* if the thread is explicitly woken from here.
+			*/
+			if (READ_ONCE(thread->__state) != TASK_INTERRUPTIBLE)
+			set_bit(NAPI_STATE_SCHED_THREADED, &napi->state);
+			wake_up_process(thread);
+			return;
+		}
+	}
+	
+	list_add_tail(&napi->poll_list, &sd->poll_list);
+	WRITE_ONCE(napi->list_owner, smp_processor_id());
+	/* If not called from net_rx_action()
+	* we have to raise NET_RX_SOFTIRQ.
+	*/
+	if (!sd->in_net_rx_action)
+	__raise_softirq_irqoff(NET_RX_SOFTIRQ);
+}
+
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+Помимо пробуждения треда обработки NAPI в этой функции в конец очереди poll\_list структуры  softnet\_data добавляется структура  napi\_struct, код которой представлен в листинге \ref{lst:napi_struct}, драйвера содержащая информацию, необходимую для обработки пришедших на устройство кадров. Также планируется на выполнение нижняя часть прерывания NET\_RX\_SOFTIRQ, обработчиком  которой является функция net\_rx\_action. Её код представлен в листинге \ref{lst:net_rx_action}.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:napi_struct,caption=Код структуры napi\_struct,showstringspaces=false]
+struct napi_struct {
+	/* The poll_list must only be managed by the entity which
+	* changes the state of the NAPI_STATE_SCHED bit.  This means
+	* whoever atomically sets that bit can add this napi_struct
+	* to the per-CPU poll_list, and whoever clears that bit
+	* can remove from the list right before clearing the bit.
+	*/
+	struct list_head	poll_list;
+	
+	unsigned long		state;
+	int			weight;
+	int			defer_hard_irqs_count;
+	unsigned long		gro_bitmask;
+	int			(*poll)(struct napi_struct *, int);
+	#ifdef CONFIG_NETPOLL
+	/* CPU actively polling if netpoll is configured */
+	int			poll_owner;
+	#endif
+	/* CPU on which NAPI has been scheduled for processing */
+	int			list_owner;
+	struct net_device	*dev;
+	struct gro_list		gro_hash[GRO_HASH_BUCKETS];
+	struct sk_buff		*skb;
+	struct list_head	rx_list; /* Pending GRO_NORMAL skbs */
+	int			rx_count; /* length of rx_list */
+	unsigned int		napi_id;
+	struct hrtimer		timer;
+	struct task_struct	*thread;
+	/* control-path-only fields follow */
+	struct list_head	dev_list;
+	struct hlist_node	napi_hash_node;
+};
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+Рассмотрим некоторые поля подробнее:
+\begin{itemize}[label=---]
+	\item poll\_list --- поддерживает двунаправленный список NAPI--структур с входными кадрами, ожидающими обработки;
+	\item poll --- функция опроса, зарегистрированная драйвером; 
+	\item weight --- максимальное количество кадров, которое может быть обработано за один раз.
+\end{itemize}
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:net_rx_action,caption=Код функции net\_rx\_action,showstringspaces=false]
+static __latent_entropy void net_rx_action(struct softirq_action *h)
+{
+	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
+	unsigned long time_limit = jiffies +
+	usecs_to_jiffies(READ_ONCE(netdev_budget_usecs));
+	int budget = READ_ONCE(netdev_budget);
+	LIST_HEAD(list);
+	LIST_HEAD(repoll);
+	
+	start:
+	sd->in_net_rx_action = true;
+	local_irq_disable();
+	list_splice_init(&sd->poll_list, &list);
+	local_irq_enable();
+	
+	for (;;) {
+		struct napi_struct *n;
+		
+		skb_defer_free_flush(sd);
+		
+		if (list_empty(&list)) {
+			if (list_empty(&repoll)) {
+				sd->in_net_rx_action = false;
+				barrier();
+				/* We need to check if ____napi_schedule()
+				* had refilled poll_list while
+				* sd->in_net_rx_action was true.
+				*/
+				if (!list_empty(&sd->poll_list))
+				goto start;
+				if (!sd_has_rps_ipi_waiting(sd))
+				goto end;
+			}
+			break;
+		}
+		
+		n = list_first_entry(&list, struct napi_struct, poll_list);
+		budget -= napi_poll(n, &repoll);
+		
+		/* If softirq window is exhausted then punt.
+		* Allow this to run for 2 jiffies since which will allow
+		* an average latency of 1.5/HZ.
+		*/
+		if (unlikely(budget <= 0 ||
+		time_after_eq(jiffies, time_limit))) {
+			sd->time_squeeze++;
+			break;
+		}
+	}
+	
+	local_irq_disable();
+	
+	list_splice_tail_init(&sd->poll_list, &list);
+	list_splice_tail(&repoll, &list);
+	list_splice(&list, &sd->poll_list);
+	if (!list_empty(&sd->poll_list))
+	__raise_softirq_irqoff(NET_RX_SOFTIRQ);
+	else
+	sd->in_net_rx_action = false;
+	
+	net_rps_action_and_irq_enable(sd);
+	end:;
+}
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+Функция итерирует по списку структур NAPI, стоящих в очереди текущего CPU, поочерёдно извлекает каждую структуру работает с ней. Цикл обработки ограничивает объём работы и время исполнения зарегистрированных NAPI-функций poll. Он делает это двумя способами: отслеживая рабочий бюджет и проверяет затраченное время. Таким образом ядро не позволяет обработке пакетов занять все ресурсы CPU. budget — это весь доступный бюджет, который будет разделён на все доступные NAPI-структуры, зарегистрированные на этот CPU. Бюджет является настраиваемой величиной, но функция всё ещё будет иметь ограничение по времени.
+
+Выбрав NAPI--структуру (napi\_struct)  вызывается функция poll, которая возвращает количество обработанных фреймов. Сама функция функция собирает сетевые данные и отправляет их в стек для дальнейшей обработки. Затем этот количество вычитается из общего бюджета. Если драйверная функция poll расходует весь свой вес (64), она не должна изменять состояние NAPI и эта структура будет добавлена в конец poll\_list. Иначе она должна отключить NAPI. NAPI будет снова включён при получении следующего IRQ.
+
+Выход из цикла net\_rx\_action будет совершён, если: список poll, зарегистрированный для данного CPU, больше не содержит NAPI--структур, остаток бюджета <= 0, был достигнут временной предел в два jiffies. Если были обработаны не все NAPI--структуры, то тогда заново планируется на выполнение NET\_RX\_SOFTIRQ. Прежде чем выполнить возврат из net\_rx\_action вызывается net\_rps\_action\_and\_irq\_enable. сли включено управление принимаемыми пакетами (RPS) то эта функция пробуждает удалённые CPU, чтобы они начали обрабатывать сетевые данные.
+
+Generic Receive Offloading (GRO) — это программная реализация аппаратной оптимизации, известной как Large Receive Offloading (LRO). Суть обоих механизмов в том, чтобы уменьшить количество пакетов, передаваемых по сетевому стеку, за счёт комбинирования <<достаточно похожих>> пакетов. Это позволяет снизить нагрузку на CPU. Пусть передаётся большой файл, и большинство пакетов содержат чанки данных из этого файла. Вместо отправки по стеку маленьких пакетов по одному, входящие пакеты можно комбинировать в один большой. А затем уже передавать его по стеку. Таким образом уровни протоколов обрабатывают заголовки одного пакета, при этом передавая пользовательской программе более крупные чанки. Но этой оптимизации присуща проблема потери информации. Если какой-то пакет имеет настроенную важную опцию или флаг, то эта опция или флаг могут быть потеряны при объединении с другими пакетами.
+
+Функция napi\_gro\_receive, вызываемая в poll функции драйверов, занимается обработкой сетевых данных для GRO, если включен, и отправкой их дальше по стеку. Большая часть логики находится в функции dev\_gro\_receive. В самой функции происходи проверка, можно ли объединить пакет с имеющимся потоком. Если пришло время сбросить GRO--пакет, то он передаётся далее по стеку посредством вызова netif\_receive\_skb. Если пакет не было объединён и в системе меньше MAX\_GRO\_SKBS (8) GRO-потоков, то в список gro\_list NAPI-структуры данного CPU добавляется новая запись. По завершении dev\_gro\_receive вызывается napi\_skb\_finish, которая освобождает структуры данных, невостребованные по причине слияния пакета, либо для передачи данных по сетевому стеку вызывается netif\_receive\_skb.
+
+Некоторые сетевые карты на аппаратном уровне поддерживают несколько очередей. Это означает, что входящие пакеты могут напрямую отправляться в разные области памяти, выделенные для каждого очереди. При этом опрос каждой области выполняется с помощью отдельных NAPI-структур. Так что прерывания и пакеты будут обрабатываться несколькими CPU. Этот механизм называется Receive Side Scaling (RSS). Receive Packet Steering (RPS) --- это программная реализация RSS. А раз реализовано в коде, то может быть применено для любой сетевой карты, даже если она имеет лишь одну очередь приёма. RPS генерирует для входящих данных хэш, чтобы определить, какой CPU должен их обработать. Затем данные помещаются во входящую очередь (backlog) этого процессора в ожидании последующей обработки. В процессор с backlog передаётся межпроцессорное прерывание (IPI), инициирующее обработку очереди.
+
+netif\_receive\_skb действует по разному, в зависимости от того, включён ли RPS. Если RPS выключен, то данные просто передаются дальше по сетевому стеку. Иначе выполняет ряд вычислений чтобы определить, backlog--очередь какого CPU нужно использовать. Для добавления в очередь используется функция enqueue\_to\_backlog, код которой представлен в листинге \ref{lst:enqueue_to_backlog}.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:enqueue_to_backlog,caption=Код функции enqueue\_to\_backlog,showstringspaces=false]
+static int enqueue_to_backlog(struct sk_buff *skb, int cpu,
+unsigned int *qtail)
+{
+	enum skb_drop_reason reason;
+	struct softnet_data *sd;
+	unsigned long flags;
+	unsigned int qlen;
+	
+	reason = SKB_DROP_REASON_NOT_SPECIFIED;
+	sd = &per_cpu(softnet_data, cpu);
+	
+	rps_lock_irqsave(sd, &flags);
+	if (!netif_running(skb->dev))
+	goto drop;
+	qlen = skb_queue_len(&sd->input_pkt_queue);
+	if (qlen <= READ_ONCE(netdev_max_backlog) && !skb_flow_limit(skb, qlen)) {
+		if (qlen) {
+			enqueue:
+			__skb_queue_tail(&sd->input_pkt_queue, skb);
+			input_queue_tail_incr_save(sd, qtail);
+			rps_unlock_irq_restore(sd, &flags);
+			return NET_RX_SUCCESS;
+		}
+		
+		/* Schedule NAPI for backlog device
+		* We can use non atomic operation since we own the queue lock
+		*/
+		if (!__test_and_set_bit(NAPI_STATE_SCHED, &sd->backlog.state))
+		napi_schedule_rps(sd);
+		goto enqueue;
+	}
+	reason = SKB_DROP_REASON_CPU_BACKLOG;
+	
+	drop:
+	sd->dropped++;
+	rps_unlock_irq_restore(sd, &flags);
+	
+	dev_core_stats_rx_dropped_inc(skb->dev);
+	kfree_skb_reason(skb, reason);
+	return NET_RX_DROP;
+}
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+Эта функция сначала получает указатель на структуру softnet\_data удалённого CPU, содержащую указатель на input\_pkt\_queue. Если привешен максимальный поток или длинна очереди, то данные отбрасываются. Пусть все проверки пройдены, тогда если очередь пустая: проверяется, запущен ли NAPI на удалённом CPU. Если нет, проверяется, находится ли в очереди на отправку IPI. Если нет, то IPI помещается в очередь, а посредством вызова \_\_\_\_napi\_schedule запускается цикл обработки NAPI. Если очередь не пуста, то данные сразу передаются в очередь.
+
+Backlog--очереди каждого CPU используют NAPI так же, как и драйвер устройства. Предоставляется функция poll, используемая для обработки пакетов из контекста SoftIRQ. Как и в случае с драйвером, здесь тоже применяется weight. Структура NAPI предоставляется в ходе инициализации сетевой подсистемы. Эти очереди обслуживаются функцией process\_backlog, которая содержит цикл выполняемый до тех пор, пока его вес не будет израсходован или пока не останется больше данных. Данные вынимаются по частям из backlog--очереди и передаются в \_\_netif\_receive\_skb. Ветвь кода будет такой же, как и в случае с отключённым RPS. process\_backlog соблюдает тот же договор с NAPI, что и драйверы устройства: NAPI отключается, если не расходуется весь вес. Поллер перезапускается посредством вызова \_\_\_\_napi\_schedule из enqueue\_to\_backlog.
