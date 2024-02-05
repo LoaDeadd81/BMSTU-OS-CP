@@ -61,7 +61,7 @@
 
 \begin{center}
 	\captionsetup{justification=raggedright,singlelinecheck=off}
-	\begin{lstlisting}[label=lst:do_softirq,caption=Код функций do\_softirq и \_\_do\_softirq]
+	\begin{lstlisting}[label=lst:do_softirq,caption=Функции do\_softirq и \_\_do\_softirq]
 asmlinkage __visible void do_softirq(void)
 {
 	__u32 pending;
@@ -166,7 +166,7 @@ asmlinkage __visible void __softirq_entry __do_softirq(void)
 
 \begin{center}
 	\captionsetup{justification=raggedright,singlelinecheck=off}
-	\begin{lstlisting}[label=lst:softnet_data,caption=Код структуры softnet\_data]
+	\begin{lstlisting}[label=lst:softnet_data,caption=Структуры softnet\_data]
 struct softnet_data {
 	struct list_head	poll_list;
 	struct sk_buff_head	process_queue;
@@ -286,7 +286,7 @@ New Api (NAPI) был создан в качестве механизма сни
 
 \begin{center}
 	\captionsetup{justification=raggedright,singlelinecheck=off}
-	\begin{lstlisting}[label=lst:napi_schedule,caption=Код функции \_\_\_\_napi\_schedule,showstringspaces=false]
+	\begin{lstlisting}[label=lst:napi_schedule,caption=Функция \_\_\_\_napi\_schedule,showstringspaces=false]
 static inline void ____napi_schedule(struct softnet_data *sd,
 struct napi_struct *napi)
 {
@@ -332,7 +332,7 @@ struct napi_struct *napi)
 
 \begin{center}
 	\captionsetup{justification=raggedright,singlelinecheck=off}
-	\begin{lstlisting}[label=lst:napi_struct,caption=Код структуры napi\_struct,showstringspaces=false]
+	\begin{lstlisting}[label=lst:napi_struct,caption=Структура napi\_struct,showstringspaces=false]
 struct napi_struct {
 	/* The poll_list must only be managed by the entity which
 	* changes the state of the NAPI_STATE_SCHED bit.  This means
@@ -378,7 +378,7 @@ struct napi_struct {
 
 \begin{center}
 	\captionsetup{justification=raggedright,singlelinecheck=off}
-	\begin{lstlisting}[label=lst:net_rx_action,caption=Код функции net\_rx\_action,showstringspaces=false]
+	\begin{lstlisting}[label=lst:net_rx_action,caption=Функция net\_rx\_action,showstringspaces=false]
 static __latent_entropy void net_rx_action(struct softirq_action *h)
 {
 	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
@@ -462,7 +462,7 @@ netif\_receive\_skb действует по разному, в зависимо�
 
 \begin{center}
 	\captionsetup{justification=raggedright,singlelinecheck=off}
-	\begin{lstlisting}[label=lst:enqueue_to_backlog,caption=Код функции enqueue\_to\_backlog,showstringspaces=false]
+	\begin{lstlisting}[label=lst:enqueue_to_backlog,caption=Функция enqueue\_to\_backlog,showstringspaces=false]
 static int enqueue_to_backlog(struct sk_buff *skb, int cpu,
 unsigned int *qtail)
 {

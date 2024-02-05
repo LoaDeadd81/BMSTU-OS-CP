@@ -43,9 +43,8 @@ int get_cq_len(struct sk_buff *cq) {
 }
 
 void print_softnet_data(struct seq_file *seq, struct softnet_data *sd){
-	seq_printf(seq, "softnet_data cpu #%d: %d %d %d %d %d %d %d\n", 
-	sd->cpu, sd->processed, sd->time_squeeze, sd->received_rps, sd->dropped, 
-	skb_queue_len(&sd->input_pkt_queue), get_cq_len(sd->completion_queue), sd->in_net_rx_action);
+	seq_printf(seq, "softnet_data cpu #%d: %d %d %d %d %d %d\n", 
+	sd->cpu, sd->processed, sd->time_squeeze, sd->received_rps, sd->dropped, get_cq_len(sd->completion_queue), sd->in_net_rx_action);
 	print_qdisc_data(seq, sd->output_queue);
 }
 
@@ -60,7 +59,7 @@ void print_dev_data(struct seq_file *seq, struct net_device *dev){
 }
 
 void print_napi_data(struct seq_file *seq, struct napi_struct *n){
-	seq_printf(seq, "\tnapi: %ld %d %d %d %d\n", n->state, n->weight, n->defer_hard_irqs_count, n->list_owner, n->rx_count);
+	seq_printf(seq, "\tnapi: %ld %d %d %d\n", n->state, n->weight, n->list_owner, n->rx_count);
 	print_dev_data(seq, n->dev);
 }
 
@@ -83,7 +82,7 @@ void print_backlog_data(struct seq_file *seq, struct softnet_data *sd) {
 	print_napi_data(seq, &sd->backlog);
 }
 
-void print_netdata(struct seq_file *seq, struct softnet_data *sd){
+void print_netdata(struct seq_file *seq, struct softnet_data *sd) {
 	print_softnet_data(seq, sd);
 	print_poll_list_data(seq, sd);
 	print_backlog_data(seq, sd);
@@ -134,14 +133,14 @@ static int __init mod_init(void)
 		return - 1;
 	}
 
-	printk(KERN_INFO "%s: module loaded!\n", FILENAME);
+	printk(KERN_INFO "%s: module loaded\n", FILENAME);
 	return 0;
 }
 
 static void __exit mod_exit(void)
 {
 	remove_proc_entry(FILENAME, NULL);
-	printk(KERN_INFO "%s: module unloaded!\n", FILENAME);
+	printk(KERN_INFO "%s: module unloaded\n", FILENAME);
 }
 
 module_init(mod_init);

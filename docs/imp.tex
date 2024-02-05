@@ -1,0 +1,203 @@
+\chapter{Технологический раздел}
+
+\section{Выбор языка и среды программирования}
+
+В качестве языка программирования для реализации поставленной задачи был выбран язык С, так как в нём есть все инструменты для реализации загружаемого модуля ядра и на нём реализовано ядро Linux. Для сборки модуля использовалась утилита make. В качестве среды разработки был выбран Visual Studio Code, так как он является бесплатным и в нём можно настроить пути поиска заголовочных файлов на заголовочные файлы Linux, после чего начинает корректно работа линтер и автодополнение.
+
+\section{Реализация загружаемого модуля ядра}
+
+В листинге \ref{lst:init} представлен код функции инициализации и выгрузки модуля. При загрузке создаётся файл в интерфейсе proc и регистрируются функции для работы с ним. Для вывода данных используются sequence файл.
+ 
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:init,caption=Функции инциализации и выгрузки модуля ,showstringspaces=false]
+ssize_t netstat_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
+{	
+	return seq_read(file, buf, size, ppos);
+}
+
+int netstat_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, netstat_show, NULL);
+}
+
+int netstat_release(struct inode *inode, struct file *file)
+{
+	return single_release(inode, file);
+}
+
+
+static struct proc_ops fops = {
+	.proc_read = netstat_read,
+	.proc_open = netstat_open,
+	.proc_release = netstat_release
+};
+
+static int __init mod_init(void)
+{
+	if (!proc_create(FILENAME, 0666, NULL, &fops))
+	{
+		printk(KERN_ERR "%s: file create failed!\n", FILENAME);
+		return - 1;
+	}
+	
+	printk(KERN_INFO "%s: module loaded\n", FILENAME);
+	return 0;
+}
+
+static void __exit mod_exit(void)
+{
+	remove_proc_entry(FILENAME, NULL);
+	printk(KERN_INFO "%s: module unloaded\n", FILENAME);
+}
+
+module_init(mod_init);
+module_exit(mod_exit);
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+В листинге \ref{lst:main} представлен код функций перебора структур softnet\_data и вывода информации содержащейся в них.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:main,caption=Функции перебора и вывода информации о структуре softnet\_data ,showstringspaces=false]
+void print_netdata(struct seq_file *seq, struct softnet_data *sd) {
+	print_softnet_data(seq, sd);
+	print_poll_list_data(seq, sd);
+	print_backlog_data(seq, sd);
+}
+
+int netstat_show(struct seq_file *seq, void *v)
+{
+	struct softnet_data *sd = NULL;
+	
+	for (int i = 0; i < nr_cpu_ids; i++)
+	{
+		if (cpu_online(i)) {
+			sd = &per_cpu(softnet_data, i);
+			print_netdata(seq, sd);
+		}
+	}
+	
+	return 0;
+}
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+В листинге \ref{lst:softnet_data_imp} представлен код функции вывода информации о структуре softnet\_data и Qdisc. Для softnet\_data выводятся: номер cpu; количество обработанных кадров, количество раз, когда у net\_rx\_action была работа; но бюджета не хватало либо было достигнуто ограничение по времени, прежде чем работа была завершена; количество раз, когда посредством межпроцессорного прерывания будили CPU для обработки пакетов; количество отброшенных кадров; длина списка буферов данных, которые были успешно переданы и ждут освобождения; флаг, находится ли структура в процессе обработки. Для Qdisc выводятся флаги и максимальный размер очереди. Также по каждому для каждого ядра выводятся: длина очереди, длина backlog, количество отброшенных элементов, количество превышение максимального размера очереди.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:softnet_data_imp,caption=Функции вывода информации о структуре softnet\_data и Qdisc ,showstringspaces=false]
+void print_qdisc_data(struct seq_file *seq, struct Qdisc *q){
+	if(q == NULL) return;
+	
+	struct gnet_stats_queue *stats;
+	
+	seq_printf(seq, "\tQdisc: %d %d\n", q->flags, q->limit);
+	
+	for (int i = 0; i < nr_cpu_ids; i++)
+	{
+		if (cpu_online(i)) {
+			stats = per_cpu_ptr(q->cpu_qstats, i);
+			seq_printf(seq, "\tQdisc cpu#%d: %d %d %d %d\n", i, stats->qlen, stats->backlog, stats->drops, stats->overlimits);
+		}
+	}
+}
+
+int get_cq_len(struct sk_buff *cq) {
+	if(cq == NULL) return 0;
+	
+	int cnt = 0;
+	
+	while (cq->next != NULL) {
+		cnt++;
+		cq = cq->next;
+	}
+	
+	return cnt;
+}
+
+void print_softnet_data(struct seq_file *seq, struct softnet_data *sd){
+	seq_printf(seq, "softnet_data cpu #%d: %d %d %d %d %d %d\n", 
+	sd->cpu, sd->processed, sd->time_squeeze, sd->received_rps, sd->dropped, get_cq_len(sd->completion_queue), sd->in_net_rx_action);
+	print_qdisc_data(seq, sd->output_queue);
+}	return 0;
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+В листинге \ref{lst:poll_list} представлен код функций вывода информации о списке poll\_list и структуре net\_device. В функции print\_poll\_list\_data обходятся все элементы списка poll\_list. Для структуры napi\_struct выводятся: состояние, максимальный объём работы, номер ядра на котором была запланирована обработка, длина rx\_list. Для net\_device выводятся: имя, состояние, максимальный размер кадра, статистика о полученных и отправленных кадрах. В статистику о полученных кадрах входят: количество обработанных пакетов и байтов, количество ошибок, количество отброшенных кадров. Для отправки аналогично.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:poll_list,caption=Функции вывода информации о списке poll\_list и структуре net\_device ,showstringspaces=false]
+void print_dev_data(struct seq_file *seq, struct net_device *dev){
+	if (dev == NULL) return;
+	
+	struct net_device_stats* stats = dev->netdev_ops->ndo_get_stats(dev);
+	
+	seq_printf(seq, "\tnetdev : %s %ld %d\n", dev->name, dev->state, dev->mtu);
+	seq_printf(seq, "\tnetdev rx: %ld %ld %ld %ld\n", stats->rx_packets, stats->rx_bytes, stats->rx_errors, stats->rx_dropped);
+	seq_printf(seq, "\tnetdev tx: %ld %ld %ld %ld\n", stats->tx_packets, stats->tx_bytes, stats->tx_errors, stats->tx_dropped);
+}
+
+void print_napi_data(struct seq_file *seq, struct napi_struct *n){
+	seq_printf(seq, "\tnapi: %ld %d %d %d\n", n->state, n->weight, n->list_owner, n->rx_count);
+	print_dev_data(seq, n->dev);
+}
+
+void print_poll_list_data(struct seq_file *seq, struct softnet_data *sd){
+	if(!list_empty(&sd->poll_list)){
+		struct list_head *head = &sd->poll_list;
+		struct list_head *cur = &sd->poll_list;
+		struct napi_struct *n;
+		
+		list_for_each_continue(cur, head){
+			n = list_entry(cur, struct napi_struct, poll_list);
+			print_napi_data(seq, n);
+		}
+	}
+	else seq_printf(seq, "\tpoll_list is empty\n");
+}
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+В листинге \ref{lst:backlog} представлен код функций вывода информации о backlog очереди. Выводится ей длина и информация о napi\_struct для обработки этой очереди.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:backlog,caption=Функция вывода информации о backlog очереди,showstringspaces=false]
+void print_backlog_data(struct seq_file *seq, struct softnet_data *sd) {
+	seq_printf(seq, "\tbacklog_q_len: %d\n", skb_queue_len(&sd->input_pkt_queue));
+	print_napi_data(seq, &sd->backlog);
+}
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+В листинге \ref{lst:make} представлен Makefiel для компиляции и загрузки модуля.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:make,caption=Makefiel для компиляции и загрузки модуля,showstringspaces=false]
+obj-m += netstat.o
+
+KDIR ?= /lib/modules/$(shell uname -r)/build
+
+ccflags-y += -std=gnu18 -Wall
+
+build:
+	make -C $(KDIR) M=$(shell pwd) modules
+
+clean:
+	make -C $(KDIR) M=$(shell pwd) clean
+
+ins: build
+	sudo insmod netstat.ko
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
