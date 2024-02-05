@@ -24,6 +24,7 @@ void print_qdisc_data(struct seq_file *seq, struct Qdisc *q){
 	{
 		if (cpu_online(i)) {
 			stats = per_cpu_ptr(q->cpu_qstats, i);
+			if(stats == NULL) continue;
 			seq_printf(seq, "\tQdisc cpu#%d: %d %d %d %d\n", i, stats->qlen, stats->backlog, stats->drops, stats->overlimits);
 		}
 	}
@@ -50,31 +51,45 @@ void print_softnet_data(struct seq_file *seq, struct softnet_data *sd){
 
 void print_dev_data(struct seq_file *seq, struct net_device *dev){
 	if (dev == NULL) return;
+	seq_printf(seq, "\tnetdev: %s %ld %d\n", dev->name, dev->state, dev->mtu);
 
-	struct net_device_stats* stats = dev->netdev_ops->ndo_get_stats(dev);
-
-	seq_printf(seq, "\tnetdev : %s %ld %d\n", dev->name, dev->state, dev->mtu);
-	seq_printf(seq, "\tnetdev rx: %ld %ld %ld %ld\n", stats->rx_packets, stats->rx_bytes, stats->rx_errors, stats->rx_dropped);
-	seq_printf(seq, "\tnetdev tx: %ld %ld %ld %ld\n", stats->tx_packets, stats->tx_bytes, stats->tx_errors, stats->tx_dropped);
+	// if(dev == NULL || dev->netdev_ops == NULL || dev->netdev_ops->ndo_get_stats == NULL) return;
+	// struct net_device_stats* stats = dev->netdev_ops->ndo_get_stats(dev);
+	// seq_printf(seq, "\tnetdev rx: %ld %ld %ld %ld\n", stats->rx_packets, stats->rx_bytes, stats->rx_errors, stats->rx_dropped);
+	// seq_printf(seq, "\tnetdev tx: %ld %ld %ld %ld\n", stats->tx_packets, stats->tx_bytes, stats->tx_errors, stats->tx_dropped);
 }
 
 void print_napi_data(struct seq_file *seq, struct napi_struct *n){
+	if(n == NULL) return;
+	
 	seq_printf(seq, "\tnapi: %ld %d %d %d\n", n->state, n->weight, n->list_owner, n->rx_count);
 	print_dev_data(seq, n->dev);
 }
 
 void print_poll_list_data(struct seq_file *seq, struct softnet_data *sd){
-	if(!list_empty(&sd->poll_list)){
-		struct list_head *head = &sd->poll_list;
-		struct list_head *cur = &sd->poll_list;
-		struct napi_struct *n;
-
-		list_for_each_continue(cur, head){
-			n = list_entry(cur, struct napi_struct, poll_list);
-			print_napi_data(seq, n);
+	long i = 0;
+	for(i = 0; i < INT_MAX; i++) {
+		if(list_empty(&sd->poll_list)){
+			
 		}
+		else{
+			LIST_HEAD(list);
+			list_splice_init(&sd->poll_list, &list);
+			if(list_empty(&list)) break;
+
+			struct list_head *head = &list;
+			struct list_head *cur = &list;
+			struct napi_struct *n;
+
+			list_for_each(cur, head){
+				n = list_entry(cur, struct napi_struct, poll_list);
+				print_napi_data(seq, n);
+			}
+			return;
+		} 
 	}
-	else seq_printf(seq, "\tpoll_list is empty\n");
+
+	seq_printf(seq, "\tpoll_list is empty %ld\n", i);
 }
 
 void print_backlog_data(struct seq_file *seq, struct softnet_data *sd) {
