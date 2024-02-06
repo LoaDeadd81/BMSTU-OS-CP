@@ -64,8 +64,8 @@ module_exit(mod_exit);
 	\begin{lstlisting}[label=lst:main,caption=Функции перебора и вывода информации о структуре softnet\_data ,showstringspaces=false]
 void print_netdata(struct seq_file *seq, struct softnet_data *sd) {
 	print_softnet_data(seq, sd);
-	print_poll_list_data(seq, sd);
 	print_backlog_data(seq, sd);
+	print_backlog_napi_data(seq, &sd->backlog);
 }
 
 int netstat_show(struct seq_file *seq, void *v)
@@ -86,94 +86,42 @@ int netstat_show(struct seq_file *seq, void *v)
 \end{center}
 \FloatBarrier
 
-В листинге \ref{lst:softnet_data_imp} представлен код функций вывода информации о структуре softnet\_data и Qdisc. Для softnet\_data выводятся: номер cpu; количество обработанных кадров; количество раз, когда у net\_rx\_action была работа, но бюджета не хватало либо было достигнуто ограничение по времени, прежде чем работа была завершена; количество раз, когда посредством межпроцессорного прерывания будили CPU для обработки пакетов; количество отброшенных кадров; длина списка буферов данных, которые были успешно переданы и ждут освобождения; флаг, находится ли структура в процессе обработки. Для Qdisc выводятся флаги и максимальный размер очереди. Также для каждого CPU выводятся: длина очереди, длина backlog, количество отброшенных элементов, количество превышение максимального размера очереди.
+В листинге \ref{lst:softnet_data_imp} представлен код функции вывода информации о структуре softnet\_data. Для softnet\_data выводятся: номер cpu; количество обработанных кадров; количество раз, когда у net\_rx\_action была работа, но бюджета не хватало либо было достигнуто ограничение по времени, прежде чем работа была завершена; количество отброшенных кадров; флаг, находится ли структура в процессе опроса.
 
 \begin{center}
 	\captionsetup{justification=raggedright,singlelinecheck=off}
-	\begin{lstlisting}[label=lst:softnet_data_imp,caption=Функции вывода информации о структуре softnet\_data и Qdisc ,showstringspaces=false]
-void print_qdisc_data(struct seq_file *seq, struct Qdisc *q){
-	if(q == NULL) return;
-	
-	struct gnet_stats_queue *stats;
-	
-	seq_printf(seq, "\tQdisc: %d %d\n", q->flags, q->limit);
-	
-	for (int i = 0; i < nr_cpu_ids; i++)
-	{
-		if (cpu_online(i)) {
-			stats = per_cpu_ptr(q->cpu_qstats, i);
-			seq_printf(seq, "\tQdisc cpu#%d: %d %d %d %d\n", i, stats->qlen, stats->backlog, stats->drops, stats->overlimits);
-		}
-	}
-}
-
-int get_cq_len(struct sk_buff *cq) {
-	if(cq == NULL) return 0;
-	
-	int cnt = 0;
-	
-	while (cq->next != NULL) {
-		cnt++;
-		cq = cq->next;
-	}
-	
-	return cnt;
-}
-
+	\begin{lstlisting}[label=lst:softnet_data_imp,caption=Функция вывода информации о структуре softnet\_data,showstringspaces=false]
 void print_softnet_data(struct seq_file *seq, struct softnet_data *sd){
-	seq_printf(seq, "softnet_data cpu #%d: %d %d %d %d %d %d\n", 
-	sd->cpu, sd->processed, sd->time_squeeze, sd->received_rps, sd->dropped, get_cq_len(sd->completion_queue), sd->in_net_rx_action);
-	print_qdisc_data(seq, sd->output_queue);
-}	return 0;
-	\end{lstlisting}
-\end{center}
-\FloatBarrier
-
-В листинге \ref{lst:poll_list} представлен код функций вывода информации о списке poll\_list и структуре net\_device. В функции print\_poll\_list\_data обходятся все элементы списка poll\_list. Для структуры napi\_struct выводятся: состояние; бюджет; номер ядра, на котором была запланирована обработка; длина rx\_list. Для net\_device выводятся: имя, состояние, максимальный размер кадра, статистика о полученных и отправленных кадрах. В статистику о полученных кадрах входят: количество обработанных пакетов и байтов, количество ошибок, количество отброшенных кадров. Для отправки аналогично.
-
-\begin{center}
-	\captionsetup{justification=raggedright,singlelinecheck=off}
-	\begin{lstlisting}[label=lst:poll_list,caption=Функции вывода информации о списке poll\_list и структуре net\_device ,showstringspaces=false]
-void print_dev_data(struct seq_file *seq, struct net_device *dev){
-	if (dev == NULL) return;
-	
-	struct net_device_stats* stats = dev->netdev_ops->ndo_get_stats(dev);
-	
-	seq_printf(seq, "\tnetdev : %s %ld %d\n", dev->name, dev->state, dev->mtu);
-	seq_printf(seq, "\tnetdev rx: %ld %ld %ld %ld\n", stats->rx_packets, stats->rx_bytes, stats->rx_errors, stats->rx_dropped);
-	seq_printf(seq, "\tnetdev tx: %ld %ld %ld %ld\n", stats->tx_packets, stats->tx_bytes, stats->tx_errors, stats->tx_dropped);
-}
-
-void print_napi_data(struct seq_file *seq, struct napi_struct *n){
-	seq_printf(seq, "\tnapi: %ld %d %d %d\n", n->state, n->weight, n->list_owner, n->rx_count);
-	print_dev_data(seq, n->dev);
-}
-
-void print_poll_list_data(struct seq_file *seq, struct softnet_data *sd){
-	if(!list_empty(&sd->poll_list)){
-		struct list_head *head = &sd->poll_list;
-		struct list_head *cur = &sd->poll_list;
-		struct napi_struct *n;
-		
-		list_for_each_continue(cur, head){
-			n = list_entry(cur, struct napi_struct, poll_list);
-			print_napi_data(seq, n);
-		}
-	}
-	else seq_printf(seq, "\tpoll_list is empty\n");
+	seq_printf(seq, "softnet_data cpu #%d: %d %d %d %d\n", sd->cpu, sd->processed, sd->time_squeeze, sd->dropped, sd->in_net_rx_action);
 }
 	\end{lstlisting}
 \end{center}
 \FloatBarrier
 
-В листинге \ref{lst:backlog} представлен код функций вывода информации о backlog очереди. Выводится ей длина и информация о napi\_struct для обработки этой очереди.
+В листинге \ref{lst:backlog} представлен код функции вывода информации о backlog очереди. Выводятся: количество раз, когда посредством межпроцессорного прерывания будили CPU для обработки пакетов; длина очереди sk\_buff, находящихся в ожидании обработки; длина очереди sk\_buff, находящихся в обработке; количество sk\_buff, добавленных в очередь.
 
 \begin{center}
 	\captionsetup{justification=raggedright,singlelinecheck=off}
 	\begin{lstlisting}[label=lst:backlog,caption=Функция вывода информации о backlog очереди,showstringspaces=false]
 void print_backlog_data(struct seq_file *seq, struct softnet_data *sd) {
-	seq_printf(seq, "\tbacklog_q_len: %d\n", skb_queue_len(&sd->input_pkt_queue));
-	print_napi_data(seq, &sd->backlog);
+	seq_printf(seq, "\tbacklog: %d %d %d %d\n", sd->received_rps, skb_queue_len(&sd->input_pkt_queue), skb_queue_len(&sd->process_queue), sd->input_queue_tail);
+}
+	\end{lstlisting}
+\end{center}
+\FloatBarrier
+
+В листинге \ref{lst:poll_list} представлен код функции вывода информации о napi\_struct backlog очереди. Для структуры napi\_struct выводятся: состояние; бюджет; номер ядра, на котором была запланирована обработка; длина rx\_list, в которую сохраняются не объединённые механизмом GRO кадры; идентификатор структуры. Также выводится количество кадров в GRO--пакетах.
+
+\begin{center}
+	\captionsetup{justification=raggedright,singlelinecheck=off}
+	\begin{lstlisting}[label=lst:poll_list,caption=Функция вывода информации о napi\_struct backlog очереди,showstringspaces=false]
+void print_backlog_napi_data(struct seq_file *seq, struct napi_struct *n){
+	if(n == NULL) return;
+	
+	seq_printf(seq, "\tbacklog_napi: %ld %d %d %d %d %ld\n", n->state, n->weight, n->list_owner, n->rx_count, n->napi_id);
+	seq_printf(seq, "\tgro_buckets: ");
+	for(int i = 0; i < GRO_HASH_BUCKETS; i++) seq_printf(seq, "%d ", n->gro_hash->count);
+	seq_printf(seq, "\n");
 }
 	\end{lstlisting}
 \end{center}
